@@ -221,16 +221,16 @@ export const usePolarisStore = create<PolarisState>((set, get) => ({
   dismissAlert: (id) => set((s) => ({ alerts: s.alerts.filter((a) => a.id !== id) })),
   addAlert: (alert) => set((s) => ({ alerts: [alert, ...s.alerts] })),
 
-  // Center matching Svalbard (78.8° N, 20° E)
+  // Center matching Svalbard Passage (Longyearbyen to Ny-Ålesund corridor)
   mapCenter: {
-    lat: 78.8,
-    lon: 20.0,
-    zoom: 5.8,
+    lat: 78.6,
+    lon: 13.8,
+    zoom: 7.0,
     bearing: 0,
     pitch: 0
   },
-  cursorPos: { lat: 79.6398, lon: 47.6367 },
-  cursorDistanceBearing: { distanceNm: 397.5, bearingDeg: 60 },
+  cursorPos: { lat: 78.5, lon: 13.8 },
+  cursorDistanceBearing: { distanceNm: 0, bearingDeg: 0 },
   gpsStatus: 'FIX',
   gpsPosition: { lat: 78.223, lon: 15.646 },
   mapFlyToTarget: null,

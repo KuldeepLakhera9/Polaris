@@ -4,6 +4,11 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import { usePolarisStore } from '../store/usePolarisStore';
 import { getDistanceAndBearing } from '../utils/geo';
 
+// Configure MapLibre Web Worker to load from static public assets (avoids 404 in Vite)
+if (typeof window !== 'undefined' && maplibregl.setWorkerUrl) {
+  maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs');
+}
+
 export default function MapLibreMap() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -177,6 +182,11 @@ export default function MapLibreMap() {
     };
 
     map.on('load', handleLoaded);
+    map.on('styledata', () => {
+      if (map.isStyleLoaded()) {
+        setMapLoaded(true);
+      }
+    });
     if (map.isStyleLoaded()) {
       setMapLoaded(true);
     }
@@ -385,138 +395,162 @@ export default function MapLibreMap() {
     });
   }, [icebergs, layers.icebergs, selectedIceberg]);
 
+  // Helper to atomically update or create GeoJSON source without throwing
+  const setGeoJsonSource = (sourceId: string, data: any) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const existing = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+    if (existing && typeof existing.setData === 'function') {
+      existing.setData(data);
+    } else {
+      try {
+        if (map.getSource(sourceId)) {
+          map.removeSource(sourceId);
+        }
+        map.addSource(sourceId, { type: 'geojson', data });
+      } catch (e) {
+        console.warn(`[MapLibre] Source ${sourceId} add error:`, e);
+      }
+    }
+  };
+
   // Render Routes and Drift Projections on map
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
 
-    // Clean up existing origin/dest markers
+    // Clean up existing origin/dest HTML markers
     originDestMarkersRef.current.forEach((m) => m.remove());
     originDestMarkersRef.current = [];
 
-    // Remove existing route and drift layers/sources
-    const cleanupLayers = [
-      'route-waypoints-pts',
-      'route-a-glow',
-      'route-a-line',
-      'route-b-glow',
-      'route-b-line',
-      'route-c-glow',
-      'route-c-line',
-      'drift-projection-line',
-      'drift-projection-points'
-    ];
-    for (const lId of cleanupLayers) {
-      if (map.getLayer(lId)) map.removeLayer(lId);
-    }
-    const cleanupSources = [
-      'route-waypoints-src',
-      'route-a-src',
-      'route-b-src',
-      'route-c-src',
-      'drift-src',
-      'drift-pts-src'
-    ];
-    for (const sId of cleanupSources) {
-      if (map.getSource(sId)) map.removeSource(sId);
-    }
+    const hasRoutes = layers.routes && routePlan && routePlan.routes && routePlan.routes.length > 0;
 
-    // Add candidate routes if available
-    if (layers.routes && routePlan && routePlan.routes && routePlan.routes.length > 0) {
+    if (hasRoutes) {
       const selectedRoute = routePlan.routes.find((r) => r.id === selectedRouteId) || routePlan.routes[0];
 
-      // 1. Draw non-selected alternative routes first (underneath)
-      for (const r of routePlan.routes) {
-        if (r.id === selectedRoute.id) continue;
-        const coords = r.waypoints.map((w) => [w.longitude, w.latitude]);
-        const sId = `route-${r.id.toLowerCase()}-src`;
-
-        map.addSource(sId, {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: coords },
-            properties: { id: r.id }
+      // 1. Alternative (non-selected) routes
+      const altFeatures = routePlan.routes
+        .filter((r) => r.id !== selectedRoute.id)
+        .map((r) => ({
+          type: 'Feature' as const,
+          geometry: {
+            type: 'LineString' as const,
+            coordinates: r.waypoints.map((w) => [w.longitude, w.latitude])
+          },
+          properties: {
+            id: r.id,
+            color: r.id === 'A' ? '#f43f5e' : '#10b981'
           }
-        });
+        }));
 
-        const altColor = r.id === 'A' ? '#f43f5e' : '#10b981';
+      setGeoJsonSource('route-alt-src', {
+        type: 'FeatureCollection',
+        features: altFeatures
+      });
+
+      if (!map.getLayer('route-alt-line')) {
         map.addLayer({
-          id: `route-${r.id.toLowerCase()}-line`,
+          id: 'route-alt-line',
           type: 'line',
-          source: sId,
+          source: 'route-alt-src',
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round',
+            visibility: 'visible'
+          },
           paint: {
-            'line-color': altColor,
-            'line-width': 2.5,
+            'line-color': ['get', 'color'],
+            'line-width': 3,
             'line-dasharray': [3, 2],
-            'line-opacity': 0.8
+            'line-opacity': 0.85
           }
         });
+      } else {
+        map.setLayoutProperty('route-alt-line', 'visibility', 'visible');
       }
 
-      // 2. Draw Selected Route ON TOP with brilliant neon cyan glow!
+      // 2. Active Selected Route Line
       const activeCoords = selectedRoute.waypoints.map((w) => [w.longitude, w.latitude]);
-      const activeSId = `route-${selectedRoute.id.toLowerCase()}-src`;
-
-      map.addSource(activeSId, {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          geometry: { type: 'LineString', coordinates: activeCoords },
-          properties: { id: selectedRoute.id }
-        }
+      setGeoJsonSource('route-active-src', {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: activeCoords
+        },
+        properties: { id: selectedRoute.id }
       });
 
       // Ambient wide halo glow
-      map.addLayer({
-        id: `route-${selectedRoute.id.toLowerCase()}-glow`,
-        type: 'line',
-        source: activeSId,
-        paint: {
-          'line-color': '#38bdf8',
-          'line-width': 10,
-          'line-opacity': 0.65,
-          'line-blur': 5
-        }
-      });
-
-      // Sharp, intense core laser line
-      map.addLayer({
-        id: `route-${selectedRoute.id.toLowerCase()}-line`,
-        type: 'line',
-        source: activeSId,
-        paint: {
-          'line-color': '#00f2fe',
-          'line-width': 4.5,
-          'line-opacity': 1
-        }
-      });
-
-      // 3. Add Intermediate Waypoint Circles
-      const intermediateWaypoints = selectedRoute.waypoints.slice(1, -1);
-      if (intermediateWaypoints.length > 0) {
-        const wpFeatures = intermediateWaypoints.map((wp, i) => ({
-          type: 'Feature' as const,
-          geometry: { type: 'Point' as const, coordinates: [wp.longitude, wp.latitude] },
-          properties: { wpIndex: i + 1 }
-        }));
-
-        map.addSource('route-waypoints-src', {
-          type: 'geojson',
-          data: { type: 'FeatureCollection', features: wpFeatures }
+      if (!map.getLayer('route-active-glow')) {
+        map.addLayer({
+          id: 'route-active-glow',
+          type: 'line',
+          source: 'route-active-src',
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round',
+            visibility: 'visible'
+          },
+          paint: {
+            'line-color': '#00f2fe',
+            'line-width': 12,
+            'line-opacity': 0.65,
+            'line-blur': 5
+          }
         });
+      } else {
+        map.setLayoutProperty('route-active-glow', 'visibility', 'visible');
+      }
 
+      // Intense laser core line
+      if (!map.getLayer('route-active-line')) {
+        map.addLayer({
+          id: 'route-active-line',
+          type: 'line',
+          source: 'route-active-src',
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round',
+            visibility: 'visible'
+          },
+          paint: {
+            'line-color': '#00f2fe',
+            'line-width': 5,
+            'line-opacity': 1
+          }
+        });
+      } else {
+        map.setLayoutProperty('route-active-line', 'visibility', 'visible');
+      }
+
+      // 3. Intermediate Waypoint Circles
+      const intermediateWaypoints = selectedRoute.waypoints.slice(1, -1);
+      const wpFeatures = intermediateWaypoints.map((wp, i) => ({
+        type: 'Feature' as const,
+        geometry: { type: 'Point' as const, coordinates: [wp.longitude, wp.latitude] },
+        properties: { wpIndex: i + 1 }
+      }));
+
+      setGeoJsonSource('route-waypoints-src', {
+        type: 'FeatureCollection',
+        features: wpFeatures
+      });
+
+      if (!map.getLayer('route-waypoints-pts')) {
         map.addLayer({
           id: 'route-waypoints-pts',
           type: 'circle',
           source: 'route-waypoints-src',
+          layout: { visibility: 'visible' },
           paint: {
             'circle-radius': 5.5,
             'circle-color': '#00f2fe',
-            'circle-stroke-width': 2,
+            'circle-stroke-width': 2.5,
             'circle-stroke-color': '#ffffff'
           }
         });
+      } else {
+        map.setLayoutProperty('route-waypoints-pts', 'visibility', 'visible');
       }
 
       // 4. Create Origin Station Marker
@@ -558,34 +592,42 @@ export default function MapLibreMap() {
         .setLngLat([lastWp.longitude, lastWp.latitude])
         .addTo(map);
       originDestMarkersRef.current.push(destMarker);
+    } else {
+      // Clear route lines when toggled off or unavailable
+      setGeoJsonSource('route-alt-src', { type: 'FeatureCollection', features: [] });
+      setGeoJsonSource('route-active-src', { type: 'FeatureCollection', features: [] });
+      setGeoJsonSource('route-waypoints-src', { type: 'FeatureCollection', features: [] });
+      if (map.getLayer('route-alt-line')) map.setLayoutProperty('route-alt-line', 'visibility', 'none');
+      if (map.getLayer('route-active-glow')) map.setLayoutProperty('route-active-glow', 'visibility', 'none');
+      if (map.getLayer('route-active-line')) map.setLayoutProperty('route-active-line', 'visibility', 'none');
+      if (map.getLayer('route-waypoints-pts')) map.setLayoutProperty('route-waypoints-pts', 'visibility', 'none');
     }
 
-    // Add Iceberg 24h drift vector if selected
+    // Iceberg 24h drift vector if selected
     if (selectedIcebergDrift && selectedIcebergDrift.forecast24h) {
       const lineCoords = [
         [selectedIcebergDrift.initialPosition.longitude, selectedIcebergDrift.initialPosition.latitude],
         ...selectedIcebergDrift.forecast24h.map((f) => [f.longitude, f.latitude])
       ];
 
-      map.addSource('drift-src', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          geometry: { type: 'LineString', coordinates: lineCoords },
-          properties: {}
-        }
+      setGeoJsonSource('drift-src', {
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: lineCoords },
+        properties: {}
       });
 
-      map.addLayer({
-        id: 'drift-projection-line',
-        type: 'line',
-        source: 'drift-src',
-        paint: {
-          'line-color': '#22d3ee',
-          'line-width': 2.5,
-          'line-dasharray': [2, 2]
-        }
-      });
+      if (!map.getLayer('drift-projection-line')) {
+        map.addLayer({
+          id: 'drift-projection-line',
+          type: 'line',
+          source: 'drift-src',
+          paint: {
+            'line-color': '#22d3ee',
+            'line-width': 2.5,
+            'line-dasharray': [2, 2]
+          }
+        });
+      }
 
       const ptFeatures = selectedIcebergDrift.forecast24h.map((f) => ({
         type: 'Feature' as const,
@@ -593,26 +635,31 @@ export default function MapLibreMap() {
         properties: { hours: `${f.hoursForward}h`, radius: f.uncertaintyRadiusNm }
       }));
 
-      map.addSource('drift-pts-src', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: ptFeatures }
+      setGeoJsonSource('drift-pts-src', {
+        type: 'FeatureCollection',
+        features: ptFeatures
       });
 
-      map.addLayer({
-        id: 'drift-projection-points',
-        type: 'circle',
-        source: 'drift-pts-src',
-        paint: {
-          'circle-radius': 5,
-          'circle-color': '#06b6d4',
-          'circle-stroke-width': 1.5,
-          'circle-stroke-color': '#ffffff'
-        }
-      });
+      if (!map.getLayer('drift-projection-points')) {
+        map.addLayer({
+          id: 'drift-projection-points',
+          type: 'circle',
+          source: 'drift-pts-src',
+          paint: {
+            'circle-radius': 5,
+            'circle-color': '#06b6d4',
+            'circle-stroke-width': 1.5,
+            'circle-stroke-color': '#ffffff'
+          }
+        });
+      }
+    } else {
+      setGeoJsonSource('drift-src', { type: 'FeatureCollection', features: [] });
+      setGeoJsonSource('drift-pts-src', { type: 'FeatureCollection', features: [] });
     }
   }, [mapLoaded, layers.routes, routePlan, selectedRouteId, selectedIcebergDrift]);
 
-  // Auto-fit route bounds when a new route is generated
+  // Auto-fit route bounds when a new route is generated or selected
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded || !routePlan?.routes?.length) return;
@@ -623,18 +670,22 @@ export default function MapLibreMap() {
       for (const wp of selectedRoute.waypoints) {
         bounds.extend([wp.longitude, wp.latitude]);
       }
-      map.fitBounds(bounds, {
-        padding: {
-          top: 100,
-          bottom: 110,
-          left: isSidebarCollapsed ? 80 : 440,
-          right: 90
-        },
-        maxZoom: 9,
-        duration: 1200
-      });
+      try {
+        map.fitBounds(bounds, {
+          padding: {
+            top: 70,
+            bottom: 70,
+            left: 70,
+            right: 70
+          },
+          maxZoom: 9,
+          duration: 1000
+        });
+      } catch (err) {
+        console.warn('fitBounds error:', err);
+      }
     }
-  }, [routePlan?.generatedAt, mapLoaded]);
+  }, [routePlan?.generatedAt, selectedRouteId, mapLoaded]);
 
   return (
     <div className="relative w-full h-full">
