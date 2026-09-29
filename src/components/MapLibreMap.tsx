@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { usePolarisStore } from '../store/usePolarisStore';
@@ -7,9 +7,12 @@ import { getDistanceAndBearing } from '../utils/geo';
 export default function MapLibreMap() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const [mapLoaded, setMapLoaded] = useState(false);
+
   const vesselMarkersRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const icebergMarkersRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const ownShipMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const originDestMarkersRef = useRef<maplibregl.Marker[]>([]);
 
   const {
     mapCenter,
@@ -58,7 +61,6 @@ export default function MapLibreMap() {
 
     clearFlyTo();
   }, [mapFlyToTarget]);
-
 
   // Initialize MapLibre
   useEffect(() => {
@@ -169,18 +171,29 @@ export default function MapLibreMap() {
       });
     });
 
+    // Mark map as ready to draw routes and vectors
+    const handleLoaded = () => {
+      setMapLoaded(true);
+    };
+
+    map.on('load', handleLoaded);
+    if (map.isStyleLoaded()) {
+      setMapLoaded(true);
+    }
+
     mapRef.current = map;
 
     return () => {
       map.remove();
       mapRef.current = null;
+      setMapLoaded(false);
     };
   }, []);
 
   // Update layer visibility
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
+    if (!map || !mapLoaded) return;
 
     if (map.getLayer('sea-ice-layer')) {
       map.setLayoutProperty('sea-ice-layer', 'visibility', layers.iceConcentration ? 'visible' : 'none');
@@ -188,7 +201,7 @@ export default function MapLibreMap() {
     if (map.getLayer('truecolor-layer')) {
       map.setLayoutProperty('truecolor-layer', 'visibility', layers.weatherClouds ? 'visible' : 'none');
     }
-  }, [layers.iceConcentration, layers.weatherClouds]);
+  }, [mapLoaded, layers.iceConcentration, layers.weatherClouds]);
 
   // Render Own-Ship Marker
   useEffect(() => {
@@ -214,7 +227,7 @@ export default function MapLibreMap() {
         </div>
         <!-- Vessel Callout Tag -->
         <div class="absolute top-10 whitespace-nowrap px-1.5 py-0.5 rounded bg-slate-950/90 border border-amber-400/60 text-[10px] font-mono text-amber-300 font-bold shadow-lg pointer-events-none">
-          POLARIS-01
+          ${ownShip.name || 'POLARIS-01'}
         </div>
       </div>
     `;
@@ -244,11 +257,9 @@ export default function MapLibreMap() {
     const currentMmsis = new Set<string>();
 
     for (const ship of vessels) {
-      // Don't duplicate own ship
       if (ownShip && ship.mmsi === ownShip.mmsi) continue;
 
       currentMmsis.add(ship.mmsi);
-      const isSelected = selectedVessel?.mmsi === ship.mmsi;
 
       let marker = vesselMarkersRef.current.get(ship.mmsi);
 
@@ -256,7 +267,6 @@ export default function MapLibreMap() {
         const el = document.createElement('div');
         el.className = 'ais-ship-marker cursor-pointer select-none';
         
-        // Color code based on ship type
         let colorClass = 'fill-sky-400 stroke-slate-900';
         if (ship.shipType?.includes('Tanker')) colorClass = 'fill-red-400 stroke-slate-950';
         else if (ship.shipType?.includes('Fishing')) colorClass = 'fill-emerald-400 stroke-slate-950';
@@ -301,7 +311,7 @@ export default function MapLibreMap() {
         vesselMarkersRef.current.delete(mmsi);
       }
     });
-  }, [vessels, layers.aisVessels, selectedVessel, ownShip]);
+  }, [vessels, layers.aisVessels, ownShip]);
 
   // Render US NIC Iceberg Markers
   useEffect(() => {
@@ -327,7 +337,7 @@ export default function MapLibreMap() {
 
         el.innerHTML = `
           <div class="group relative flex items-center justify-center">
-            <div class="w-6 h-6 flex items-center justify-center rounded-sm bg-cyan-950/80 border ${isSelected ? 'border-cyan-300 ring-2 ring-cyan-400' : 'border-cyan-500/80'} shadow-md transform hover:scale-125 transition-all">
+            <div class="w-6 h-6 flex items-center justify-center rounded-sm bg-cyan-950/90 border ${isSelected ? 'border-cyan-300 ring-2 ring-cyan-400' : 'border-cyan-500/80'} shadow-md transform hover:scale-125 transition-all">
               <svg viewBox="0 0 24 24" class="w-4 h-4 fill-cyan-300 stroke-cyan-100 stroke-1">
                 <polygon points="12 2, 22 12, 12 22, 2 12" />
               </svg>
@@ -341,7 +351,6 @@ export default function MapLibreMap() {
 
         el.onclick = async () => {
           selectIceberg(berg);
-          // Request real 24h dead-reckoning drift projection
           setIsLoadingDrift(true);
           try {
             const res = await fetch('/api/iceberg-drift', {
@@ -379,80 +388,183 @@ export default function MapLibreMap() {
   // Render Routes and Drift Projections on map
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
+    if (!map || !mapLoaded) return;
 
-    // Remove existing route layers/sources if any
-    const cleanupLayers = ['route-b-glow', 'route-b-line', 'route-a-line', 'route-c-line', 'drift-projection-line', 'drift-projection-points'];
+    // Clean up existing origin/dest markers
+    originDestMarkersRef.current.forEach((m) => m.remove());
+    originDestMarkersRef.current = [];
+
+    // Remove existing route and drift layers/sources
+    const cleanupLayers = [
+      'route-waypoints-pts',
+      'route-a-glow',
+      'route-a-line',
+      'route-b-glow',
+      'route-b-line',
+      'route-c-glow',
+      'route-c-line',
+      'drift-projection-line',
+      'drift-projection-points'
+    ];
     for (const lId of cleanupLayers) {
       if (map.getLayer(lId)) map.removeLayer(lId);
     }
-    const cleanupSources = ['route-b-src', 'route-a-src', 'route-c-src', 'drift-src', 'drift-pts-src'];
+    const cleanupSources = [
+      'route-waypoints-src',
+      'route-a-src',
+      'route-b-src',
+      'route-c-src',
+      'drift-src',
+      'drift-pts-src'
+    ];
     for (const sId of cleanupSources) {
       if (map.getSource(sId)) map.removeSource(sId);
     }
 
     // Add candidate routes if available
-    if (layers.routes && routePlan && routePlan.routes) {
+    if (layers.routes && routePlan && routePlan.routes && routePlan.routes.length > 0) {
+      const selectedRoute = routePlan.routes.find((r) => r.id === selectedRouteId) || routePlan.routes[0];
+
+      // 1. Draw non-selected alternative routes first (underneath)
       for (const r of routePlan.routes) {
-        const coords = r.waypoints.map(w => [w.longitude, w.latitude]);
+        if (r.id === selectedRoute.id) continue;
+        const coords = r.waypoints.map((w) => [w.longitude, w.latitude]);
         const sId = `route-${r.id.toLowerCase()}-src`;
-        
+
         map.addSource(sId, {
           type: 'geojson',
           data: {
             type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: coords
-            },
+            geometry: { type: 'LineString', coordinates: coords },
             properties: { id: r.id }
           }
         });
 
-        if (r.id === 'B') {
-          // Glow layer for optimal route
-          map.addLayer({
-            id: 'route-b-glow',
-            type: 'line',
-            source: sId,
-            paint: {
-              'line-color': '#38bdf8',
-              'line-width': 8,
-              'line-opacity': 0.35,
-              'line-blur': 4
-            }
-          });
-          map.addLayer({
-            id: 'route-b-line',
-            type: 'line',
-            source: sId,
-            paint: {
-              'line-color': '#0284c7',
-              'line-width': 3,
-              'line-dasharray': [2, 1]
-            }
-          });
-        } else {
-          map.addLayer({
-            id: `route-${r.id.toLowerCase()}-line`,
-            type: 'line',
-            source: sId,
-            paint: {
-              'line-color': r.id === 'A' ? '#f43f5e' : '#94a3b8',
-              'line-width': 2,
-              'line-dasharray': [3, 2],
-              'line-opacity': 0.7
-            }
-          });
-        }
+        const altColor = r.id === 'A' ? '#f43f5e' : '#10b981';
+        map.addLayer({
+          id: `route-${r.id.toLowerCase()}-line`,
+          type: 'line',
+          source: sId,
+          paint: {
+            'line-color': altColor,
+            'line-width': 2.5,
+            'line-dasharray': [3, 2],
+            'line-opacity': 0.8
+          }
+        });
       }
+
+      // 2. Draw Selected Route ON TOP with brilliant neon cyan glow!
+      const activeCoords = selectedRoute.waypoints.map((w) => [w.longitude, w.latitude]);
+      const activeSId = `route-${selectedRoute.id.toLowerCase()}-src`;
+
+      map.addSource(activeSId, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: activeCoords },
+          properties: { id: selectedRoute.id }
+        }
+      });
+
+      // Ambient wide halo glow
+      map.addLayer({
+        id: `route-${selectedRoute.id.toLowerCase()}-glow`,
+        type: 'line',
+        source: activeSId,
+        paint: {
+          'line-color': '#38bdf8',
+          'line-width': 10,
+          'line-opacity': 0.65,
+          'line-blur': 5
+        }
+      });
+
+      // Sharp, intense core laser line
+      map.addLayer({
+        id: `route-${selectedRoute.id.toLowerCase()}-line`,
+        type: 'line',
+        source: activeSId,
+        paint: {
+          'line-color': '#00f2fe',
+          'line-width': 4.5,
+          'line-opacity': 1
+        }
+      });
+
+      // 3. Add Intermediate Waypoint Circles
+      const intermediateWaypoints = selectedRoute.waypoints.slice(1, -1);
+      if (intermediateWaypoints.length > 0) {
+        const wpFeatures = intermediateWaypoints.map((wp, i) => ({
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [wp.longitude, wp.latitude] },
+          properties: { wpIndex: i + 1 }
+        }));
+
+        map.addSource('route-waypoints-src', {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: wpFeatures }
+        });
+
+        map.addLayer({
+          id: 'route-waypoints-pts',
+          type: 'circle',
+          source: 'route-waypoints-src',
+          paint: {
+            'circle-radius': 5.5,
+            'circle-color': '#00f2fe',
+            'circle-stroke-width': 2,
+            'circle-stroke-color': '#ffffff'
+          }
+        });
+      }
+
+      // 4. Create Origin Station Marker
+      const firstWp = selectedRoute.waypoints[0];
+      const originName = routePlan.origin?.name?.split(',')[0] || 'Origin';
+      const elOrig = document.createElement('div');
+      elOrig.className = 'origin-pin cursor-pointer select-none';
+      elOrig.innerHTML = `
+        <div class="relative flex flex-col items-center">
+          <div class="whitespace-nowrap px-2.5 py-1 rounded-lg bg-emerald-950/95 border border-emerald-400 text-[11px] font-mono font-bold text-emerald-300 shadow-[0_4px_12px_rgba(0,0,0,0.6)] mb-1 pointer-events-none">
+            START: ${originName}
+          </div>
+          <div class="w-6 h-6 rounded-full bg-emerald-500 border-2 border-white shadow-[0_0_14px_rgba(16,185,129,0.9)] flex items-center justify-center">
+            <div class="w-2 h-2 rounded-full bg-white"></div>
+          </div>
+        </div>
+      `;
+      const origMarker = new maplibregl.Marker({ element: elOrig, anchor: 'bottom' })
+        .setLngLat([firstWp.longitude, firstWp.latitude])
+        .addTo(map);
+      originDestMarkersRef.current.push(origMarker);
+
+      // 5. Create Destination Station Marker
+      const lastWp = selectedRoute.waypoints[selectedRoute.waypoints.length - 1];
+      const destName = routePlan.destination?.name?.split(',')[0] || 'Destination';
+      const elDest = document.createElement('div');
+      elDest.className = 'dest-pin cursor-pointer select-none';
+      elDest.innerHTML = `
+        <div class="relative flex flex-col items-center">
+          <div class="whitespace-nowrap px-2.5 py-1 rounded-lg bg-amber-950/95 border border-amber-400 text-[11px] font-mono font-bold text-amber-300 shadow-[0_4px_12px_rgba(0,0,0,0.6)] mb-1 pointer-events-none">
+            DEST: ${destName}
+          </div>
+          <div class="w-6 h-6 rounded-full bg-amber-500 border-2 border-white shadow-[0_0_14px_rgba(245,158,11,0.9)] flex items-center justify-center">
+            <div class="w-2 h-2 rounded-full bg-white animate-pulse"></div>
+          </div>
+        </div>
+      `;
+      const destMarker = new maplibregl.Marker({ element: elDest, anchor: 'bottom' })
+        .setLngLat([lastWp.longitude, lastWp.latitude])
+        .addTo(map);
+      originDestMarkersRef.current.push(destMarker);
     }
 
     // Add Iceberg 24h drift vector if selected
     if (selectedIcebergDrift && selectedIcebergDrift.forecast24h) {
       const lineCoords = [
         [selectedIcebergDrift.initialPosition.longitude, selectedIcebergDrift.initialPosition.latitude],
-        ...selectedIcebergDrift.forecast24h.map(f => [f.longitude, f.latitude])
+        ...selectedIcebergDrift.forecast24h.map((f) => [f.longitude, f.latitude])
       ];
 
       map.addSource('drift-src', {
@@ -475,8 +587,7 @@ export default function MapLibreMap() {
         }
       });
 
-      // Point features for 6h, 12h, 18h, 24h steps
-      const ptFeatures = selectedIcebergDrift.forecast24h.map(f => ({
+      const ptFeatures = selectedIcebergDrift.forecast24h.map((f) => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [f.longitude, f.latitude] },
         properties: { hours: `${f.hoursForward}h`, radius: f.uncertaintyRadiusNm }
@@ -499,7 +610,31 @@ export default function MapLibreMap() {
         }
       });
     }
-  }, [layers.routes, routePlan, selectedRouteId, selectedIcebergDrift]);
+  }, [mapLoaded, layers.routes, routePlan, selectedRouteId, selectedIcebergDrift]);
+
+  // Auto-fit route bounds when a new route is generated
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded || !routePlan?.routes?.length) return;
+
+    const selectedRoute = routePlan.routes.find((r) => r.id === selectedRouteId) || routePlan.routes[0];
+    if (selectedRoute && selectedRoute.waypoints.length > 0) {
+      const bounds = new maplibregl.LngLatBounds();
+      for (const wp of selectedRoute.waypoints) {
+        bounds.extend([wp.longitude, wp.latitude]);
+      }
+      map.fitBounds(bounds, {
+        padding: {
+          top: 100,
+          bottom: 110,
+          left: isSidebarCollapsed ? 80 : 440,
+          right: 90
+        },
+        maxZoom: 9,
+        duration: 1200
+      });
+    }
+  }, [routePlan?.generatedAt, mapLoaded]);
 
   return (
     <div className="relative w-full h-full">
