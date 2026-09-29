@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { formatCoordinatePair } from '../utils/geo';
 import { Iceberg } from '../types';
+import { calculateIcebergDriftDirect } from '../services/polarEngine';
 
 export default function IceIntelligenceView() {
   const { 
@@ -48,6 +49,7 @@ export default function IceIntelligenceView() {
 
     // Trigger drift calculation
     setIsLoadingDrift(true);
+    let loaded = false;
     try {
       const res = await fetch('/api/iceberg-drift', {
         method: 'POST',
@@ -55,14 +57,26 @@ export default function IceIntelligenceView() {
         body: JSON.stringify({ iceberg: berg })
       });
       if (res.ok) {
-        const drift = await res.json();
-        setIcebergDrift(drift);
+        const ct = res.headers.get('content-type');
+        if (ct && ct.includes('application/json')) {
+          const drift = await res.json();
+          setIcebergDrift(drift);
+          loaded = true;
+        }
       }
     } catch (e) {
-      console.error('Failed calculating drift:', e);
-    } finally {
-      setIsLoadingDrift(false);
+      console.warn('[Polaris] Backend drift API unreachable, calculating in browser:', e);
     }
+
+    if (!loaded) {
+      try {
+        const drift = calculateIcebergDriftDirect(berg);
+        setIcebergDrift(drift);
+      } catch (err) {
+        console.error('Local iceberg drift error:', err);
+      }
+    }
+    setIsLoadingDrift(false);
   };
 
   return (

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { usePolarisStore } from '../../store/usePolarisStore';
 import { X, CloudSunRain, Waves, Wind, Thermometer, Compass, Gauge, Loader2 } from 'lucide-react';
 import { MetOceanData } from '../../types';
+import { fetchMetOceanDirect } from '../../services/polarEngine';
 
 export default function WeatherDrawer() {
   const { activePanel, setActivePanel, mapCenter, ownShip } = usePolarisStore();
@@ -14,9 +15,17 @@ export default function WeatherDrawer() {
       const lat = mapCenter.lat;
       const lon = mapCenter.lon;
       fetch(`/api/weather?lat=${lat}&lon=${lon}`)
-        .then(r => r.json())
-        .then(d => setMetocean(d))
-        .catch(e => console.error(e))
+        .then(async (r) => {
+          if (!r.ok) throw new Error('API offline');
+          const ct = r.headers.get('content-type');
+          if (ct && ct.includes('application/json')) return r.json();
+          throw new Error('Not JSON');
+        })
+        .then((d) => setMetocean(d))
+        .catch(async () => {
+          const direct = await fetchMetOceanDirect(lat, lon);
+          setMetocean(direct);
+        })
         .finally(() => setLoading(false));
     }
   }, [activePanel, mapCenter.lat, mapCenter.lon]);

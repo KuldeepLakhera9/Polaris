@@ -23,7 +23,10 @@ export default function RoutePlanningDrawer() {
     selectedRouteId, 
     setSelectedRouteId,
     isGeneratingRoute,
-    setIsGeneratingRoute
+    calculateRoute,
+    setOrigin: setStoreOrigin,
+    setDestination: setStoreDestination,
+    setVesselClass: setStoreVesselClass
   } = usePolarisStore();
 
   const [origin, setOrigin] = useState("longyearbyen");
@@ -33,25 +36,10 @@ export default function RoutePlanningDrawer() {
   if (activePanel !== 'routes') return null;
 
   const handleGenerateRoute = async () => {
-    setIsGeneratingRoute(true);
-    try {
-      const res = await fetch('/api/route', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ origin, destination, vesselClass })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setRoutePlan(data);
-        if (data.routes && data.routes.length > 0) {
-          setSelectedRouteId(data.routes[0].id);
-        }
-      }
-    } catch (e) {
-      console.error('Route generation failed:', e);
-    } finally {
-      setIsGeneratingRoute(false);
-    }
+    setStoreOrigin(origin);
+    setStoreDestination(destination);
+    setStoreVesselClass(vesselClass);
+    await calculateRoute();
   };
 
   const selectedRoute = routePlan?.routes.find(r => r.id === selectedRouteId) || routePlan?.routes[0];

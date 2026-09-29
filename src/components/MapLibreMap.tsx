@@ -3,6 +3,7 @@ import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { usePolarisStore } from '../store/usePolarisStore';
 import { getDistanceAndBearing } from '../utils/geo';
+import { calculateIcebergDriftDirect } from '../services/polarEngine';
 
 // Configure MapLibre Web Worker to load from static public assets (avoids 404 in Vite)
 if (typeof window !== 'undefined' && maplibregl.setWorkerUrl) {
@@ -362,6 +363,7 @@ export default function MapLibreMap() {
         el.onclick = async () => {
           selectIceberg(berg);
           setIsLoadingDrift(true);
+          let loaded = false;
           try {
             const res = await fetch('/api/iceberg-drift', {
               method: 'POST',
@@ -369,14 +371,26 @@ export default function MapLibreMap() {
               body: JSON.stringify({ iceberg: berg })
             });
             if (res.ok) {
-              const drift = await res.json();
-              setIcebergDrift(drift);
+              const ct = res.headers.get('content-type');
+              if (ct && ct.includes('application/json')) {
+                const drift = await res.json();
+                setIcebergDrift(drift);
+                loaded = true;
+              }
             }
           } catch (e) {
-            console.error('Failed to calculate iceberg drift:', e);
-          } finally {
-            setIsLoadingDrift(false);
+            console.warn('[Polaris] Server iceberg drift unreachable, calculating locally:', e);
           }
+
+          if (!loaded) {
+            try {
+              const drift = calculateIcebergDriftDirect(berg);
+              setIcebergDrift(drift);
+            } catch (err) {
+              console.error('Local iceberg drift error:', err);
+            }
+          }
+          setIsLoadingDrift(false);
         };
 
         marker = new maplibregl.Marker({ element: el })

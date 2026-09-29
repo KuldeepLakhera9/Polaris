@@ -8,6 +8,8 @@ import DataSourceTransparencyModal from './components/modals/DataSourceTranspare
 import SettingsModal from './components/modals/SettingsModal';
 import { usePolarisStore } from './store/usePolarisStore';
 
+import { getDefaultIcebergs } from './services/polarEngine';
+
 export default function App() {
   const {
     activeTab,
@@ -19,7 +21,7 @@ export default function App() {
     setGpsStatus
   } = usePolarisStore();
 
-  // 1. Establish AISstream WebSocket Relay Connection
+  // 1. Establish AISstream WebSocket Relay Connection (with graceful serverless fallback)
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
@@ -33,14 +35,14 @@ export default function App() {
         ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
-          console.log('[Polaris Frontend] Connected to local AIS WebSocket relay');
+          console.log('[Polaris Frontend] Connected to AIS WebSocket relay');
         };
 
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
             if (data.type === 'INIT_STATE') {
-              if (data.vessels) setVessels(data.vessels);
+              if (data.vessels && data.vessels.length > 0) setVessels(data.vessels);
               if (data.status) setAisStatus(data.status);
             } else if (data.type === 'VESSEL_UPDATE') {
               if (data.vessel) updateVessel(data.vessel);
@@ -53,14 +55,18 @@ export default function App() {
         };
 
         ws.onclose = () => {
-          reconnectTimeout = setTimeout(connectWs, 5000);
+          if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            reconnectTimeout = setTimeout(connectWs, 5000);
+          }
         };
 
-        ws.onerror = (err) => {
-          console.warn('[Polaris Frontend] WS encountered error:', err);
+        ws.onerror = () => {
+          console.warn('[Polaris Frontend] Live WS relay unavailable on serverless host, operating with Polar Satellite AIS fleet.');
         };
       } catch (e) {
-        reconnectTimeout = setTimeout(connectWs, 8000);
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+          reconnectTimeout = setTimeout(connectWs, 8000);
+        }
       }
     };
 
@@ -77,15 +83,25 @@ export default function App() {
 
   // 2. Initial Data Ingestion (USNIC Real Icebergs & Default Route Analysis)
   useEffect(() => {
-    // Fetch US National Ice Center real iceberg database
+    // Fetch US National Ice Center real iceberg database with graceful fallback
     fetch('/api/icebergs')
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error('Iceberg API unavailable');
+        const cType = r.headers.get('content-type');
+        if (cType && cType.includes('application/json')) {
+          return r.json();
+        }
+        throw new Error('Not JSON');
+      })
       .then((data) => {
-        if (data.icebergs) {
+        if (data && data.icebergs && data.icebergs.length > 0) {
           setIcebergs(data.icebergs);
         }
       })
-      .catch((e) => console.error('Failed loading icebergs:', e));
+      .catch((e) => {
+        console.warn('[Polaris] Serving offline USNIC / IIP Iceberg catalog:', e.message);
+        setIcebergs(getDefaultIcebergs());
+      });
 
     // Calculate initial candidate routes (Longyearbyen to Ny-Ålesund)
     calculateRoute();
